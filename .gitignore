@@ -1,1 +1,27 @@
-.env.local
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Sensitive data: invoices and everything derived from them
+sample_invoice_pdf/
+sample_invoice_json/
+sample_invoice_comparison/
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

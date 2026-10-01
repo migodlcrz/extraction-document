@@ -19,7 +19,10 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from invoice_llm.schema import InvoiceExtraction
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# .env.local (git-ignored) first; .env only fills in anything it doesn't set.
+_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ROOT / ".env.local")
+load_dotenv(_ROOT / ".env")
 
 # Verbatim from the repo.
 SYSTEM_PROMPT = """\

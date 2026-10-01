@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pymupdf
@@ -42,9 +42,23 @@ _DASH_LINE = re.compile(r"^[\s\-_=—–]{10,}$")
 
 @dataclass
 class Element:
-    y0: float
-    x0: float
-    text: str
+    """One piece of page layout. ``kind`` is "table", "text" or "rule". Tables carry
+    ``rows`` (cells as strings, multi-line cells joined with " / "); text blocks carry
+    ``lines``. Shared by the LLM renderer below and the rule-based extractor."""
+
+    kind: str
+    page: int  # 1-based
+    bbox: tuple[float, float, float, float]
+    region: str
+    rows: list[list[str]] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
+    style: list[str] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        if self.kind == "table":
+            return "\n".join(" | ".join(r) for r in self.rows)
+        return "\n".join(self.lines)
 
 
 def _region(bbox: tuple[float, float, float, float], page: pymupdf.Page) -> str:
@@ -106,15 +120,15 @@ def _inside(point: tuple[float, float], bbox: tuple) -> bool:
     return bbox[0] - 1 <= point[0] <= bbox[2] + 1 and bbox[1] - 1 <= point[1] <= bbox[3] + 1
 
 
-def page_structure(page: pymupdf.Page) -> list[str]:
+def page_elements(page: pymupdf.Page) -> list[Element]:
+    """The page's layout as data: tables and text blocks in reading order."""
     elements: list[Element] = []
+    page_no = page.number + 1
 
     tables = _merge_tables(page.find_tables().tables)
     table_boxes = [bbox for bbox, _ in tables]
-    for n, (bbox, rows) in enumerate(tables, 1):
-        tag = (f"[TABLE T{page.number + 1}.{n} | {_region(bbox, page)} | bbox {_bbox_str(bbox)}"
-               f" | {len(rows)} rows x {len(rows[0])} cols]")
-        elements.append(Element(bbox[1], bbox[0], f"{tag}\n{_table_markdown(rows)}"))
+    for bbox, rows in tables:
+        elements.append(Element("table", page_no, bbox, _region(bbox, page), rows=rows))
 
     body_size = _body_font_size(page)
     for block in page.get_text("dict", sort=True)["blocks"]:
@@ -138,20 +152,37 @@ def page_structure(page: pymupdf.Page) -> list[str]:
             continue
         bbox = tuple(block["bbox"])
         if all(_DASH_LINE.match(l) for l in lines):
-            elements.append(Element(bbox[1], bbox[0], "[HORIZONTAL RULE]"))
+            elements.append(Element("rule", page_no, bbox, _region(bbox, page)))
             continue
         style = []
         if bold:
             style.append("bold")
         if body_size and max_size >= body_size * 1.3:
             style.append(f"large {max_size:.0f}pt")
-        tag = f"[TEXT | {_region(bbox, page)} | bbox {_bbox_str(bbox)}"
-        tag += f" | {', '.join(style)}]" if style else "]"
-        elements.append(Element(bbox[1], bbox[0], tag + "\n" + "\n".join(lines)))
+        elements.append(Element("text", page_no, bbox, _region(bbox, page),
+                                lines=lines, style=style))
 
     # Reading order: top-to-bottom, then left-to-right for items on roughly the same band.
-    elements.sort(key=lambda e: (round(e.y0 / 6), e.x0))
-    return [e.text for e in elements]
+    elements.sort(key=lambda e: (round(e.bbox[1] / 6), e.bbox[0]))
+    return elements
+
+
+def page_structure(page: pymupdf.Page) -> list[str]:
+    """Render :func:`page_elements` as the tagged text the LLM receives."""
+    out, table_no = [], 0
+    for e in page_elements(page):
+        if e.kind == "rule":
+            out.append("[HORIZONTAL RULE]")
+        elif e.kind == "table":
+            table_no += 1
+            out.append(f"[TABLE T{e.page}.{table_no} | {e.region} | bbox {_bbox_str(e.bbox)}"
+                       f" | {len(e.rows)} rows x {len(e.rows[0])} cols]\n"
+                       f"{_table_markdown(e.rows)}")
+        else:
+            tag = f"[TEXT | {e.region} | bbox {_bbox_str(e.bbox)}"
+            tag += f" | {', '.join(e.style)}]" if e.style else "]"
+            out.append(tag + "\n" + "\n".join(e.lines))
+    return out
 
 
 def _body_font_size(page: pymupdf.Page) -> float:
@@ -163,6 +194,11 @@ def _body_font_size(page: pymupdf.Page) -> float:
                 size = round(s["size"], 1)
                 counts[size] = counts.get(size, 0) + len(s["text"].strip())
     return max(counts, key=counts.get) if counts else 0.0
+
+
+def pdf_elements(path: Path) -> list[Element]:
+    with pymupdf.open(str(path)) as doc:
+        return [e for page in doc for e in page_elements(page)]
 
 
 def pdf_to_structured_text(path: Path) -> str:
